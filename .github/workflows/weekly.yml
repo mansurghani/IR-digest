@@ -2,16 +2,16 @@ name: IR Weekly Digest
 
 on:
   schedule:
-    - cron: '0 13 * * 1'  # Every Monday at 1:00pm UTC (8:00am Chicago time)
+  - cron: '0 15 * * 1'  # Every Monday at 7:00am Pacific time (UTC-8)
   workflow_dispatch:        # Allows you to run it manually anytime
 
 jobs:
   send-digest:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v3
+      - uses: actions/checkout@v4
       - name: Set up Python
-        uses: actions/setup-python@v4
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
       - name: Run digest script
