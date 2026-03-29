@@ -142,13 +142,6 @@ def fetch_papers():
         if not pmid:
             continue
 
-        # If abstract is short, try Semantic Scholar for a fuller version
-        if len(abstract) < 400:
-            fuller = fetch_full_abstract(pmid, doi)
-            if fuller:
-                print("  Enhanced abstract for PMID " + pmid + " (" + str(len(fuller)) + " chars)")
-                abstract = fuller
-
         # Skip if still no useful abstract
         if len(abstract) < 100:
             continue
