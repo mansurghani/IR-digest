@@ -1,19 +1,21 @@
-import os
 import urllib.request
 import urllib.parse
 import smtplib
 import json
 import re
 import csv
+import os
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta
 
+# ── CONFIG ── fill these in ──────────────────────────────
 ANTHROPIC_API_KEY  = os.environ["ANTHROPIC_API_KEY"]
 GMAIL_ADDRESS      = os.environ["GMAIL_ADDRESS"]
 GMAIL_APP_PASSWORD = os.environ["GMAIL_APP_PASSWORD"]
 SHEET_ID           = os.environ["SHEET_ID"]
 SHEET_URL          = os.environ["SHEET_URL"]
+# ─────────────────────────────────────────────────────────
 
 
 def fetch_subscribers():
@@ -34,24 +36,37 @@ def fetch_subscribers():
 
 def fetch_papers():
     print("Step 1: Fetching papers from PubMed...")
-    last_week = (datetime.now() - timedelta(days=7)).strftime("%Y/%m/%d")
-    today     = datetime.now().strftime("%Y/%m/%d")
 
-    query = (
-        '(("J Vasc Interv Radiol"[Journal] OR "Cardiovasc Intervent Radiol"[Journal] '
-        'OR "European Radiology"[Journal] OR "Radiology"[Journal] '
-        'OR "J Am Coll Radiol"[Journal] OR "European Journal of Radiology"[Journal] '
-        'OR "Abdom Radiol (NY)"[Journal] OR "Diagn Interv Imaging"[Journal] '
-        'OR "Tech Vasc Interv Radiol"[Journal] OR "Semin Intervent Radiol"[Journal] '
-        'OR "Annals of Surgery"[Journal] OR "Journal of Hepatology"[Journal] '
-        'OR "Hepatology"[Journal] OR "Journal of Vascular Surgery"[Journal] '
-        'OR "European Heart Journal"[Journal] OR "Circulation"[Journal] '
-        'OR "J. Clin. Oncol."[Journal] OR "Ann. Oncol."[Journal] '
-        'OR "Gut"[Journal] OR "Lancet"[Journal] '
-        'OR "N. Engl. J. Med."[Journal] OR "JAMA"[Journal] '
-        'OR "BMJ"[Journal] OR "Cancer"[Journal] '
-        'OR "Liver Cancer"[Journal] OR "Hepatology International"[Journal]) '
-        'AND ("Radiology, Interventional"[MeSH Terms] OR "embolization"[Title/Abstract] '
+    # Search window: 8 days ago to 1 day ago (i.e. the 7 full days before today)
+    date_to   = datetime.now() - timedelta(days=1)
+    date_from = datetime.now() - timedelta(days=8)
+    date_to_str   = date_to.strftime("%Y/%m/%d")
+    date_from_str = date_from.strftime("%Y/%m/%d")
+
+    # IR-specific journals — all articles included regardless of keywords
+    ir_journals_query = (
+        '("J Vasc Interv Radiol"[Journal] OR '
+        '"Tech Vasc Interv Radiol"[Journal] OR '
+        '"Semin Intervent Radiol"[Journal])'
+    )
+
+    # Other high-impact journals — filtered by IR keywords
+    other_journals_query = (
+        '("Cardiovasc Intervent Radiol"[Journal] OR "European Radiology"[Journal] '
+        'OR "Radiology"[Journal] OR "J Am Coll Radiol"[Journal] '
+        'OR "European Journal of Radiology"[Journal] OR "Abdom Radiol (NY)"[Journal] '
+        'OR "Diagn Interv Imaging"[Journal] OR "Annals of Surgery"[Journal] '
+        'OR "Journal of Hepatology"[Journal] OR "Hepatology"[Journal] '
+        'OR "Journal of Vascular Surgery"[Journal] OR "European Heart Journal"[Journal] '
+        'OR "Circulation"[Journal] OR "J. Clin. Oncol."[Journal] '
+        'OR "Ann. Oncol."[Journal] OR "Gut"[Journal] OR "Lancet"[Journal] '
+        'OR "N. Engl. J. Med."[Journal] OR "JAMA"[Journal] OR "BMJ"[Journal] '
+        'OR "Cancer"[Journal] OR "Liver Cancer"[Journal] '
+        'OR "Hepatology International"[Journal])'
+    )
+
+    ir_keywords_query = (
+        '("Radiology, Interventional"[MeSH Terms] OR "embolization"[Title/Abstract] '
         'OR "ablation"[Title/Abstract] OR "endovascular"[Title/Abstract] '
         'OR "TIPS"[Title/Abstract] OR "transhepatic"[Title/Abstract] '
         'OR "percutaneous"[Title/Abstract] OR "thrombectomy"[Title/Abstract] '
@@ -60,12 +75,24 @@ def fetch_papers():
         'OR "catheter"[Title/Abstract] OR "angioplasty"[Title/Abstract] '
         'OR "image-guided"[Title/Abstract] OR "microwave ablation"[Title/Abstract] '
         'OR "radiofrequency ablation"[Title/Abstract] '
-        'OR "transarterial"[Title/Abstract]) '
+        'OR "transarterial"[Title/Abstract])'
+    )
+
+    exclusions_query = (
         'NOT ("cerebral"[Title] OR "intracranial"[Title] OR "stroke"[Title] '
         'OR "pediatric"[Title] OR "paediatric"[Title] OR "children"[Title] '
         'OR "neonatal"[Title] OR "congenital"[Title] '
-        'OR "neurointervention"[Title/Abstract])) '
-        'AND ("' + last_week + '"[PDAT] : "' + today + '"[PDAT])'
+        'OR "neurointervention"[Title/Abstract])'
+    )
+
+    date_query = '("' + date_from_str + '"[PDAT] : "' + date_to_str + '"[PDAT])'
+
+    # Combine: (IR journals OR (other journals AND keywords)) NOT exclusions AND date
+    query = (
+        '(' + ir_journals_query +
+        ' OR (' + other_journals_query + ' AND ' + ir_keywords_query + ')) '
+        + exclusions_query +
+        ' AND ' + date_query
     )
 
     search_url = (
@@ -122,7 +149,7 @@ def fetch_papers():
         })
 
     print("Step 1 complete. Papers found: " + str(len(papers)))
-    return papers, last_week, today
+    return papers, date_from_str, date_to_str
 
 
 def summarize(papers):
