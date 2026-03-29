@@ -228,7 +228,7 @@ def build_html_email(claude_response, papers, date_from, date_to):
             editors_note = block.replace("EDITORS_NOTE:", "").strip()
             continue
 
-       pmid = title = journal = bottom_line = key_stat = summary = ""
+        pmid = title = journal = bottom_line = key_stat = summary = ""
         current_field = None
         for line in block.split("\n"):
             line = line.strip()
