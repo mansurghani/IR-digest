@@ -140,7 +140,7 @@ def fetch_papers():
             "pmid":     pmid,
             "title":    title,
             "journal":  journal or journal_abbr,
-            "abstract": abstract[:800],
+            "abstract": abstract[:1200],
             "url":      "https://pubmed.ncbi.nlm.nih.gov/" + pmid + "/"
         })
 
