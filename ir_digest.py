@@ -228,21 +228,34 @@ def build_html_email(claude_response, papers, date_from, date_to):
             editors_note = block.replace("EDITORS_NOTE:", "").strip()
             continue
 
-        pmid = title = journal = bottom_line = key_stat = summary = ""
+       pmid = title = journal = bottom_line = key_stat = summary = ""
+        current_field = None
         for line in block.split("\n"):
             line = line.strip()
             if line.startswith("PMID:"):
                 pmid = line.replace("PMID:", "").strip()
+                current_field = None
             elif line.startswith("TITLE:"):
                 title = line.replace("TITLE:", "").strip()
+                current_field = "title"
             elif line.startswith("JOURNAL:"):
                 journal = line.replace("JOURNAL:", "").strip()
+                current_field = None
             elif line.startswith("BOTTOM_LINE:"):
                 bottom_line = line.replace("BOTTOM_LINE:", "").strip()
+                current_field = "bottom_line"
             elif line.startswith("KEY_STAT:"):
                 key_stat = line.replace("KEY_STAT:", "").strip()
+                current_field = "key_stat"
             elif line.startswith("SUMMARY:"):
                 summary = line.replace("SUMMARY:", "").strip()
+                current_field = "summary"
+            elif line and current_field == "bottom_line":
+                bottom_line += " " + line
+            elif line and current_field == "key_stat":
+                key_stat += " " + line
+            elif line and current_field == "summary":
+                summary += " " + line
 
         if not title or not summary:
             continue
