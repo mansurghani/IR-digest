@@ -9,13 +9,13 @@ from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta
 
-# ── CONFIG ── fill these in ──────────────────────────────
+# ── CONFIG ──────────────────────────────────────────────
 ANTHROPIC_API_KEY  = os.environ["ANTHROPIC_API_KEY"]
 GMAIL_ADDRESS      = os.environ["GMAIL_ADDRESS"]
 GMAIL_APP_PASSWORD = os.environ["GMAIL_APP_PASSWORD"]
 SHEET_ID           = os.environ["SHEET_ID"]
 SHEET_URL          = os.environ["SHEET_URL"]
-# ─────────────────────────────────────────────────────────
+# ────────────────────────────────────────────────────────
 
 
 def fetch_subscribers():
@@ -37,20 +37,17 @@ def fetch_subscribers():
 def fetch_papers():
     print("Step 1: Fetching papers from PubMed...")
 
-    # Search window: 8 days ago to 1 day ago (i.e. the 7 full days before today)
     date_to   = datetime.now() - timedelta(days=1)
     date_from = datetime.now() - timedelta(days=8)
     date_to_str   = date_to.strftime("%Y/%m/%d")
     date_from_str = date_from.strftime("%Y/%m/%d")
 
-    # IR-specific journals — all articles included regardless of keywords
     ir_journals_query = (
         '("J Vasc Interv Radiol"[Journal] OR '
         '"Tech Vasc Interv Radiol"[Journal] OR '
         '"Semin Intervent Radiol"[Journal])'
     )
 
-    # Other high-impact journals — filtered by IR keywords
     other_journals_query = (
         '("Cardiovasc Intervent Radiol"[Journal] OR "European Radiology"[Journal] '
         'OR "Radiology"[Journal] OR "J Am Coll Radiol"[Journal] '
@@ -87,7 +84,6 @@ def fetch_papers():
 
     date_query = '("' + date_from_str + '"[PDAT] : "' + date_to_str + '"[PDAT])'
 
-    # Combine: (IR journals OR (other journals AND keywords)) NOT exclusions AND date
     query = (
         '(' + ir_journals_query +
         ' OR (' + other_journals_query + ' AND ' + ir_keywords_query + ')) '
@@ -182,6 +178,9 @@ def summarize(papers):
                 "TITLE: [full title]\n"
                 "JOURNAL: [journal name]\n"
                 "BOTTOM_LINE: [One sentence: the single most important takeaway from this paper]\n"
+                "KEY_STAT: [One sentence containing the single most important quantitative result "
+                "with specific numbers, confidence intervals, or p-values if available. "
+                "If no quantitative data exists write NONE]\n"
                 "SUMMARY: [Write 4-5 sentences covering: (1) study design and sample size, "
                 "(2) patient population and intervention studied, "
                 "(3) primary endpoint and key quantitative results with specific numbers, "
@@ -229,7 +228,7 @@ def build_html_email(claude_response, papers, date_from, date_to):
             editors_note = block.replace("EDITORS_NOTE:", "").strip()
             continue
 
-        pmid = title = journal = bottom_line = summary = ""
+        pmid = title = journal = bottom_line = key_stat = summary = ""
         for line in block.split("\n"):
             line = line.strip()
             if line.startswith("PMID:"):
@@ -240,6 +239,8 @@ def build_html_email(claude_response, papers, date_from, date_to):
                 journal = line.replace("JOURNAL:", "").strip()
             elif line.startswith("BOTTOM_LINE:"):
                 bottom_line = line.replace("BOTTOM_LINE:", "").strip()
+            elif line.startswith("KEY_STAT:"):
+                key_stat = line.replace("KEY_STAT:", "").strip()
             elif line.startswith("SUMMARY:"):
                 summary = line.replace("SUMMARY:", "").strip()
 
@@ -251,6 +252,7 @@ def build_html_email(claude_response, papers, date_from, date_to):
             "title":       title,
             "journal":     journal,
             "bottom_line": bottom_line,
+            "key_stat":    key_stat,
             "summary":     summary,
             "url":         url
         })
@@ -272,6 +274,14 @@ def build_html_email(claude_response, papers, date_from, date_to):
             'font-style:italic;font-weight:600;border-left:3px solid #1a3a5c;padding-left:10px;">'
             + e["bottom_line"] +
             '</p>'
+            + (
+                '<p style="margin:0 0 12px;font-size:15px;color:#333;line-height:1.7;'
+                'text-decoration:underline;font-weight:600;">'
+                + e["key_stat"] +
+                '</p>'
+                if e.get("key_stat") and e["key_stat"] != "NONE" else ""
+            )
+            +
             '<p style="margin:0 0 12px;font-size:15px;color:#333;line-height:1.7;">'
             + e["summary"] +
             '</p>'
