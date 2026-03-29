@@ -106,7 +106,7 @@ def fetch_papers():
 
     fetch_url = (
         "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
-        "?db=pubmed&id=" + ",".join(ids) + "&rettype=xml&retmode=xml"
+        "?db=pubmed&id=" + ",".join(ids) + "&rettype=abstract&retmode=xml"
     )
 
     with urllib.request.urlopen(fetch_url) as r:
