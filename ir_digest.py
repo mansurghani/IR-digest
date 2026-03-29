@@ -178,14 +178,14 @@ def summarize(papers):
                 "TITLE: [full title]\n"
                 "JOURNAL: [journal name]\n"
                 "BOTTOM_LINE: [One sentence: the single most important takeaway from this paper]\n"
-                "KEY_STAT: [One sentence containing the single most important quantitative result "
-                "with specific numbers, confidence intervals, or p-values if available. "
-                "If no quantitative data exists write NONE]\n"
                 "SUMMARY: [Write 4-5 sentences covering: (1) study design and sample size, "
                 "(2) patient population and intervention studied, "
                 "(3) primary endpoint and key quantitative results with specific numbers, "
                 "(4) statistical significance and any safety findings, "
-                "(5) clinical takeaway for a practicing IR]\n"
+                "(5) clinical takeaway for a practicing IR. "
+                "For the single most important quantitative result, wrap that sentence in <u> and </u> HTML tags. "
+                "For example: <u>The 1-year primary patency rate was 87% in the stent group vs 63% in the angioplasty group (p=0.002).</u> "
+                "Only underline one sentence — the single most important quantitative result.]\n"
                 "---\n\n"
                 "After all papers, end with:\n"
                 "EDITORS_NOTE: [2 sentences on the overall theme of this week's literature]\n\n"
@@ -228,7 +228,7 @@ def build_html_email(claude_response, papers, date_from, date_to):
             editors_note = block.replace("EDITORS_NOTE:", "").strip()
             continue
 
-        pmid = title = journal = bottom_line = key_stat = summary = ""
+        pmid = title = journal = bottom_line = summary = ""
         current_field = None
         for line in block.split("\n"):
             line = line.strip()
@@ -244,16 +244,11 @@ def build_html_email(claude_response, papers, date_from, date_to):
             elif line.startswith("BOTTOM_LINE:"):
                 bottom_line = line.replace("BOTTOM_LINE:", "").strip()
                 current_field = "bottom_line"
-            elif line.startswith("KEY_STAT:"):
-                key_stat = line.replace("KEY_STAT:", "").strip()
-                current_field = "key_stat"
             elif line.startswith("SUMMARY:"):
                 summary = line.replace("SUMMARY:", "").strip()
                 current_field = "summary"
             elif line and current_field == "bottom_line":
                 bottom_line += " " + line
-            elif line and current_field == "key_stat":
-                key_stat += " " + line
             elif line and current_field == "summary":
                 summary += " " + line
 
@@ -265,7 +260,6 @@ def build_html_email(claude_response, papers, date_from, date_to):
             "title":       title,
             "journal":     journal,
             "bottom_line": bottom_line,
-            "key_stat":    key_stat,
             "summary":     summary,
             "url":         url
         })
@@ -287,14 +281,6 @@ def build_html_email(claude_response, papers, date_from, date_to):
             'font-style:italic;font-weight:600;border-left:3px solid #1a3a5c;padding-left:10px;">'
             + e["bottom_line"] +
             '</p>'
-            + (
-                '<p style="margin:0 0 12px;font-size:15px;color:#333;line-height:1.7;'
-                'text-decoration:underline;font-weight:600;">'
-                + e["key_stat"] +
-                '</p>'
-                if e.get("key_stat") and e["key_stat"] != "NONE" else ""
-            )
-            +
             '<p style="margin:0 0 12px;font-size:15px;color:#333;line-height:1.7;">'
             + e["summary"] +
             '</p>'
