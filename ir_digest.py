@@ -159,7 +159,9 @@ def summarize(papers):
             "Journal: " + p["journal"] + "\n"
             "Abstract: " + p["abstract"] + "\n"
         )
-
+    for i, p in enumerate(papers, 1):
+        print(f"Paper {i}: {p['title'][:60]} | Abstract length: {len(p['abstract'])} chars | Sample: {p['abstract'][500:600]}")
+        
     payload = json.dumps({
         "model": "claude-sonnet-4-20250514",
         "max_tokens": 8000,
