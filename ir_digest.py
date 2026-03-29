@@ -106,7 +106,7 @@ def fetch_papers():
 
     fetch_url = (
         "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
-        "?db=pubmed&id=" + ",".join(ids) + "&rettype=abstract&retmode=xml"
+        "?db=pubmed&id=" + ",".join(ids) + "&rettype=xml&retmode=xml"
     )
 
     with urllib.request.urlopen(fetch_url) as r:
@@ -130,17 +130,34 @@ def fetch_papers():
         title_match = re.search(r"<ArticleTitle>(.*?)</ArticleTitle>", medline, re.DOTALL)
         title = re.sub(r"<[^>]+>", "", title_match.group(1)).strip() if title_match else ""
 
-        abstract_match = re.search(r"<AbstractText[^>]*>(.*?)</AbstractText>", medline, re.DOTALL)
-        abstract = re.sub(r"<[^>]+>", "", abstract_match.group(1)).strip() if abstract_match else ""
+        # Extract DOI
+        doi_match = re.search(r'<ArticleId IdType="doi">(.*?)</ArticleId>', article_xml)
+        doi = doi_match.group(1).strip() if doi_match else None
 
-        if not abstract or not pmid:
+        # Extract abstract from PubMed XML
+        abstract_parts = re.findall(r"<AbstractText[^>]*>(.*?)</AbstractText>", medline, re.DOTALL)
+        abstract = " ".join(re.sub(r"<[^>]+>", "", part).strip() for part in abstract_parts)
+        abstract = re.sub(r"&#x[0-9a-fA-F]+;", "", abstract).strip()
+
+        if not pmid:
+            continue
+
+        # If abstract is short, try Semantic Scholar for a fuller version
+        if len(abstract) < 400:
+            fuller = fetch_full_abstract(pmid, doi)
+            if fuller:
+                print("  Enhanced abstract for PMID " + pmid + " (" + str(len(fuller)) + " chars)")
+                abstract = fuller
+
+        # Skip if still no useful abstract
+        if len(abstract) < 100:
             continue
 
         papers.append({
             "pmid":     pmid,
             "title":    title,
             "journal":  journal or journal_abbr,
-            "abstract": abstract[:1200],
+            "abstract": abstract[:2500],
             "url":      "https://pubmed.ncbi.nlm.nih.gov/" + pmid + "/"
         })
 
