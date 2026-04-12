@@ -45,11 +45,12 @@ def fetch_papers():
     ir_journals_query = (
         '("J Vasc Interv Radiol"[Journal] OR '
         '"Tech Vasc Interv Radiol"[Journal] OR '
-        '"Semin Intervent Radiol"[Journal])'
+        '"Semin Intervent Radiol"[Journal] OR '
+        '"Cardiovasc Intervent Radiol"[Journal])'
     )
 
     other_journals_query = (
-        '("Cardiovasc Intervent Radiol"[Journal] OR "European Radiology"[Journal] '
+        '("European Radiology"[Journal] '
         'OR "Radiology"[Journal] OR "J Am Coll Radiol"[Journal] '
         'OR "European Journal of Radiology"[Journal] OR "Abdom Radiol (NY)"[Journal] '
         'OR "Diagn Interv Imaging"[Journal] OR "Annals of Surgery"[Journal] '
@@ -70,9 +71,7 @@ def fetch_papers():
         'OR "chemoembolization"[Title/Abstract] OR "radioembolization"[Title/Abstract] '
         'OR "Y90"[Title/Abstract] OR "TACE"[Title/Abstract] OR "TARE"[Title/Abstract] '
         'OR "catheter"[Title/Abstract] OR "angioplasty"[Title/Abstract] '
-        'OR "image-guided"[Title/Abstract] OR "microwave ablation"[Title/Abstract] '
-        'OR "radiofrequency ablation"[Title/Abstract] '
-        'OR "transarterial"[Title/Abstract])'
+        'OR "image-guided"[Title/Abstract] OR "transarterial"[Title/Abstract])'
     )
 
     exclusions_query = (
