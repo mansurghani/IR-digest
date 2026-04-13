@@ -184,7 +184,7 @@ def summarize(papers):
                 "2. MEDIUM priority: Prospective cohort studies, large retrospective series (n>100)\n"
                 "3. LOW priority: Small retrospective studies, technical notes\n"
                 "4. EXCLUDE or only include if exceptionally novel: Case reports, case series (n<10)\n\n"
-                "Exclude anything focused on neuro IR, pediatric IR or interventional cardiology.\n\n"
+                "Exclude anything focused on neuro IR, pediatric IR, interventional cardiology or open vascular surgeries.\n\n"
                 "For each paper respond using EXACTLY this format with no deviation:\n\n"
                 "PMID: [the PMID number only, e.g. 12345678]\n"
                 "TITLE: [full title]\n"
