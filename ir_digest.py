@@ -8,6 +8,7 @@ import os
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from datetime import datetime, timedelta
+import time
 
 # ── CONFIG ──────────────────────────────────────────────
 ANTHROPIC_API_KEY  = os.environ["ANTHROPIC_API_KEY"]
@@ -360,19 +361,56 @@ def send_email(html_body, date_from, date_to, subscribers):
     fmt     = lambda d: datetime.strptime(d, "%Y/%m/%d").strftime("%b %d")
     subject = "IR Weekly Digest — " + fmt(date_from) + " to " + fmt(date_to) + ", " + str(datetime.now().year)
 
+    sent       = 0
+    failed     = []
+    retry_wait = 60  # seconds to wait if rate limited
+
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
         s.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
         for recipient in subscribers:
-            msg = MIMEMultipart("alternative")
-            msg["From"]    = GMAIL_ADDRESS
-            msg["To"]      = recipient
-            msg["Subject"] = subject
-            msg.attach(MIMEText(html_body, "html"))
-            s.send_message(msg)
-            del msg["To"]
-            print("  Sent to " + recipient)
+            try:
+                msg = MIMEMultipart("alternative")
+                msg["From"]    = GMAIL_ADDRESS
+                msg["To"]      = recipient
+                msg["Subject"] = subject
+                msg.attach(MIMEText(html_body, "html"))
+                s.send_message(msg)
+                del msg["To"]
+                sent += 1
+                print("  Sent to " + recipient + " (" + str(sent) + "/" + str(len(subscribers)) + ")")
+                time.sleep(2)  # 2 second delay between each email
+            except smtplib.SMTPException as e:
+                print("  Failed to send to " + recipient + ": " + str(e))
+                failed.append(recipient)
+                if "rate" in str(e).lower() or "421" in str(e) or "450" in str(e):
+                    print("  Rate limit detected. Waiting " + str(retry_wait) + " seconds...")
+                    time.sleep(retry_wait)
 
-    print("All done! Email sent to all subscribers.")
+    # Retry failed recipients once
+    if failed:
+        print("Retrying " + str(len(failed)) + " failed recipients...")
+        time.sleep(retry_wait)
+        try:
+            with smtplib.SMTP_SSL("smtp.gmail.com", 465) as s:
+                s.login(GMAIL_ADDRESS, GMAIL_APP_PASSWORD)
+                for recipient in failed:
+                    try:
+                        msg = MIMEMultipart("alternative")
+                        msg["From"]    = GMAIL_ADDRESS
+                        msg["To"]      = recipient
+                        msg["Subject"] = subject
+                        msg.attach(MIMEText(html_body, "html"))
+                        s.send_message(msg)
+                        del msg["To"]
+                        sent += 1
+                        print("  Retry succeeded: " + recipient)
+                        time.sleep(2)
+                    except Exception as e:
+                        print("  Retry failed: " + recipient + ": " + str(e))
+        except Exception as e:
+            print("  Retry connection failed: " + str(e))
+
+    print("All done! Successfully sent to " + str(sent) + "/" + str(len(subscribers)) + " subscribers.")
 
 
 if __name__ == "__main__":
