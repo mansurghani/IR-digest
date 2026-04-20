@@ -39,7 +39,7 @@ def fetch_papers():
     print("Step 1: Fetching papers from PubMed...")
 
     date_to   = datetime.now() - timedelta(days=1)
-    date_from = datetime.now() - timedelta(days=8)
+    date_from = datetime.now() - timedelta(days=7)
     date_to_str   = date_to.strftime("%Y/%m/%d")
     date_from_str = date_from.strftime("%Y/%m/%d")
 
