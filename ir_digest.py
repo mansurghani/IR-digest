@@ -173,7 +173,7 @@ def summarize(papers):
         print(f"Paper {i}: {p['title'][:60]} | Abstract length: {len(p['abstract'])} chars | Sample: {p['abstract'][500:600]}")
         
     payload = json.dumps({
-        "model": "claude-sonnet-4-20250514",
+        "model": "claude-sonnet-4-6-20251120",
         "max_tokens": 8000,
         "messages": [{
             "role": "user",
