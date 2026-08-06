@@ -5,6 +5,9 @@ on:
     - cron: '0 15 * * 1'  # Every Monday at 7:00am Pacific time (UTC-8)
   workflow_dispatch:
 
+permissions:
+  contents: write
+  
 jobs:
   send-digest:
     runs-on: ubuntu-latest
@@ -23,4 +26,6 @@ jobs:
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           SHEET_ID: ${{ secrets.SHEET_ID }}
           SHEET_URL: ${{ secrets.SHEET_URL }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: python ir_digest.py
