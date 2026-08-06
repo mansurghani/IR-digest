@@ -170,7 +170,75 @@ def fetch_papers():
     print("Step 1 complete. Papers found: " + str(len(papers)))
     return papers, date_from_str, date_to_str
 
+def load_sent_pmids():
+    """Load previously sent PMIDs from GitHub via the API."""
+    token = os.environ.get("GITHUB_TOKEN", "")
+    repo  = os.environ.get("GITHUB_REPOSITORY", "")
+    if not token or not repo:
+        print("No GitHub token/repo found, skipping PMID history.")
+        return set()
+    try:
+        url = "https://api.github.com/repos/" + repo + "/contents/sent_pmids.txt"
+        req = urllib.request.Request(url, headers={
+            "Authorization": "token " + token,
+            "User-Agent":    "IR-Digest"
+        })
+        with urllib.request.urlopen(req) as r:
+            data = json.loads(r.read())
+            import base64
+            content = base64.b64decode(data["content"]).decode("utf-8")
+            pmids = set(line.strip() for line in content.splitlines() if line.strip())
+            print("Loaded " + str(len(pmids)) + " previously sent PMIDs.")
+            return pmids
+    except Exception as e:
+        print("No existing PMID history found (first run or error): " + str(e))
+        return set()
 
+
+def save_sent_pmids(pmids):
+    """Save sent PMIDs back to GitHub repository."""
+    token = os.environ.get("GITHUB_TOKEN", "")
+    repo  = os.environ.get("GITHUB_REPOSITORY", "")
+    if not token or not repo:
+        print("No GitHub token/repo found, skipping PMID save.")
+        return
+    try:
+        import base64
+
+        # Get current file SHA if it exists (needed for update)
+        sha = None
+        url = "https://api.github.com/repos/" + repo + "/contents/sent_pmids.txt"
+        try:
+            req = urllib.request.Request(url, headers={
+                "Authorization": "token " + token,
+                "User-Agent":    "IR-Digest"
+            })
+            with urllib.request.urlopen(req) as r:
+                sha = json.loads(r.read()).get("sha")
+        except:
+            pass
+
+        content = "\n".join(sorted(pmids))
+        encoded = base64.b64encode(content.encode("utf-8")).decode("utf-8")
+
+        payload = {
+            "message": "Update sent PMIDs",
+            "content": encoded
+        }
+        if sha:
+            payload["sha"] = sha
+
+        data = json.dumps(payload).encode()
+        req = urllib.request.Request(url, data=data, headers={
+            "Authorization":  "token " + token,
+            "User-Agent":     "IR-Digest",
+            "Content-Type":   "application/json"
+        }, method="PUT")
+        with urllib.request.urlopen(req) as r:
+            print("Saved " + str(len(pmids)) + " PMIDs to repository.")
+    except Exception as e:
+        print("Failed to save PMIDs: " + str(e))
+        
 def summarize(papers):
     print("Step 2: Sending papers to Claude...")
 
@@ -437,6 +505,21 @@ if __name__ == "__main__":
         if not papers:
             print("No papers found this week.")
         else:
-            claude_response = summarize(papers)
-            html = build_html_email(claude_response, papers, date_from, date_to)
-            send_email(html, date_from, date_to, subscribers)
+            # Load previously sent PMIDs and filter out duplicates
+            sent_pmids = load_sent_pmids()
+            new_papers = [p for p in papers if p["pmid"] not in sent_pmids]
+            duplicate_count = len(papers) - len(new_papers)
+            if duplicate_count > 0:
+                print("Filtered out " + str(duplicate_count) + " previously sent papers.")
+            print("New papers to summarize: " + str(len(new_papers)))
+
+            if not new_papers:
+                print("No new papers this week after filtering duplicates.")
+            else:
+                claude_response = summarize(new_papers)
+                html = build_html_email(claude_response, new_papers, date_from, date_to)
+                send_email(html, date_from, date_to, subscribers)
+
+                # Save all sent PMIDs for future runs
+                all_sent = sent_pmids | {p["pmid"] for p in new_papers}
+                save_sent_pmids(all_sent)
