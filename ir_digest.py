@@ -367,6 +367,53 @@ DIGEST_TOOL = {
 }
 
 
+def call_claude(prompt, tool, max_tokens, required_key):
+    """Ask Claude to answer through `tool`; returns the tool input as a dict."""
+    payload = json.dumps({
+        "model": CLAUDE_MODEL,
+        "max_tokens": max_tokens,
+        "tools": [tool],
+        # Newer models don't allow forcing a specific tool; "auto" plus the
+        # prompt instruction works, and the text fallback below covers the rest.
+        "tool_choice": {"type": "auto"},
+        "messages": [{"role": "user", "content": prompt}],
+    }).encode()
+
+    raw = http_request(
+        "https://api.anthropic.com/v1/messages",
+        data=payload,
+        headers={
+            "Content-Type":      "application/json",
+            "x-api-key":         ANTHROPIC_API_KEY,
+            "anthropic-version": "2023-06-01",
+        },
+        retries=5,
+        label="Claude API",
+    )
+    response = json.loads(raw)
+    content = response.get("content", [])
+
+    for block in content:
+        if block.get("type") == "tool_use" and block.get("name") == tool["name"]:
+            return block["input"]
+
+    # Fallback: Claude answered in text. Pull out the JSON object if there is one.
+    text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
+    start, end = text.find("{"), text.rfind("}")
+    if start != -1 and end > start:
+        try:
+            candidate = json.loads(text[start:end + 1])
+            if isinstance(candidate, dict) and required_key in candidate:
+                print("  (Claude replied in text; parsed the JSON from it.)")
+                return candidate
+        except json.JSONDecodeError:
+            pass
+
+    raise RuntimeError("Claude did not return the expected answer. Stop reason: " +
+                       str(response.get("stop_reason")) + ". Reply start: " +
+                       json.dumps(content)[:500])
+
+
 def summarize(papers):
     print("Step 2: Sending " + str(len(papers)) + " papers to Claude (" + CLAUDE_MODEL + ")...")
 
@@ -409,56 +456,443 @@ def summarize(papers):
         "Papers:\n" + paper_list
     )
 
-    payload = json.dumps({
-        "model": CLAUDE_MODEL,
-        "max_tokens": 12000,
-        "tools": [DIGEST_TOOL],
-        # Newer models don't allow forcing a specific tool; "auto" plus the
-        # prompt instruction works, and the text fallback below covers the rest.
-        "tool_choice": {"type": "auto"},
-        "messages": [{"role": "user", "content": prompt}],
-    }).encode()
-
-    raw = http_request(
-        "https://api.anthropic.com/v1/messages",
-        data=payload,
-        headers={
-            "Content-Type":      "application/json",
-            "x-api-key":         ANTHROPIC_API_KEY,
-            "anthropic-version": "2023-06-01",
-        },
-        retries=5,
-        label="Claude API",
-    )
-    response = json.loads(raw)
-    content = response.get("content", [])
-
-    digest = None
-    for block in content:
-        if block.get("type") == "tool_use" and block.get("name") == "submit_digest":
-            digest = block["input"]
-            break
-
-    if digest is None:
-        # Fallback: Claude answered in text. Pull out the JSON object if there is one.
-        text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
-        start, end = text.find("{"), text.rfind("}")
-        if start != -1 and end > start:
-            try:
-                candidate = json.loads(text[start:end + 1])
-                if isinstance(candidate, dict) and "papers" in candidate:
-                    digest = candidate
-                    print("  (Claude replied in text; parsed the JSON from it.)")
-            except json.JSONDecodeError:
-                pass
-
-    if digest is None:
-        raise RuntimeError("Claude did not return a digest. Stop reason: " +
-                           str(response.get("stop_reason")) + ". Reply start: " +
-                           json.dumps(content)[:500])
+    digest = call_claude(prompt, DIGEST_TOOL, max_tokens=12000, required_key="papers")
 
     print("Step 2 complete. Claude selected " + str(len(digest.get("papers", []))) + " papers.")
     return digest
+
+
+# ── FULL-TEXT ANALYSIS PAGES ────────────────────────────
+# For selected papers that are in the PubMed Central Open Access subset (with a
+# Creative Commons license, so figures may be republished with attribution), we
+# fetch the full text and figures from NCBI's public open-data bucket, have
+# Claude write a detailed analysis, and publish it as a page on GitHub Pages.
+# Papers without open-access full text get no button.
+
+PMC_S3          = "https://pmc-oa-opendata.s3.amazonaws.com/"
+SITE_DIR        = "docs"                   # GitHub Pages serves this folder
+MAX_FULLTEXT_CHARS = 150000
+MAX_KEY_FIGURES    = 4
+WEB_IMAGE_EXTS  = (".jpg", ".jpeg", ".png", ".gif", ".webp")
+XLINK_HREF      = "{http://www.w3.org/1999/xlink}href"
+
+
+def pages_base_url():
+    """Public URL of the GitHub Pages site, e.g. https://owner.github.io/IR-digest/"""
+    override = os.environ.get("PAGES_BASE_URL", "").strip()
+    if override:
+        return override.rstrip("/") + "/"
+    repo = os.environ.get("GITHUB_REPOSITORY", "")
+    if "/" not in repo:
+        return ""
+    owner, name = repo.split("/", 1)
+    return "https://" + owner.lower() + ".github.io/" + name + "/"
+
+
+def pmids_to_pmcids(pmids):
+    """Map PMIDs to numeric PMC IDs (only for papers that are in PubMed Central)."""
+    if not pmids:
+        return {}
+    url = ("https://eutils.ncbi.nlm.nih.gov/entrez/eutils/elink.fcgi?dbfrom=pubmed&db=pmc"
+           "&linkname=pubmed_pmc&retmode=json&id=" + "&id=".join(pmids))
+    data = json.loads(http_request(url, label="PubMed->PMC link"))
+    out = {}
+    for ls in data.get("linksets", []):
+        ids = ls.get("ids", [])
+        for db in ls.get("linksetdbs", []) or []:
+            if db.get("links") and ids:
+                out[str(ids[0])] = str(db["links"][0])
+    return out
+
+
+def find_open_access_record(pmc_num):
+    """Return (prefix, metadata) for the latest version in the PMC open-data bucket, or (None, None)."""
+    listing = http_request(PMC_S3 + "?list-type=2&delimiter=/&prefix=PMC" + pmc_num + ".",
+                           label="PMC open-data listing")
+    root = ET.fromstring(listing)
+    ns = {"s3": "http://s3.amazonaws.com/doc/2006-03-01/"}
+    prefixes = [p.text for p in root.findall("s3:CommonPrefixes/s3:Prefix", ns)]
+    if not prefixes:
+        return None, None
+    prefix = max(prefixes, key=lambda p: int(p.rstrip("/").split(".")[-1]))   # e.g. PMC123.2/
+    ver_id = prefix.rstrip("/")
+    meta = json.loads(http_request(PMC_S3 + prefix + ver_id + ".json", label="PMC metadata"))
+    return prefix, meta
+
+
+def xml_text(el):
+    return " ".join("".join(el.itertext()).split()) if el is not None else ""
+
+
+def paragraph_text(el):
+    """Paragraph text without any figures/tables nested inside it (PMC often nests them in <p>)."""
+    parts = [el.text or ""]
+    for child in el:
+        if child.tag.split("}")[-1] not in ("fig", "table-wrap"):
+            parts.append(paragraph_text(child))
+        parts.append(child.tail or "")
+    return " ".join("".join(parts).split())
+
+
+def table_to_html(table_el):
+    """Rebuild a JATS/XHTML table as plain, safe HTML (only structural tags kept)."""
+    keep = {"table", "thead", "tbody", "tfoot", "tr", "th", "td"}
+    inline = {"bold": "b", "italic": "i", "sup": "sup", "sub": "sub"}
+
+    def walk(el):
+        tag = el.tag.split("}")[-1]
+        inner = html.escape(el.text or "")
+        for child in el:
+            inner += walk(child) + html.escape(child.tail or "")
+        if tag in keep:
+            attrs = ""
+            for a in ("colspan", "rowspan"):
+                v = el.get(a)
+                if v and v.isdigit():
+                    attrs += ' ' + a + '="' + v + '"'
+            return "<" + tag + attrs + ">" + inner + "</" + tag + ">"
+        if tag in inline:
+            return "<" + inline[tag] + ">" + inner + "</" + inline[tag] + ">"
+        if tag == "break":
+            return "<br>"
+        return inner
+
+    return walk(table_el)
+
+
+def parse_fulltext(xml_bytes, media_names):
+    """Pull section text plus figures/tables out of a JATS article."""
+    root = ET.fromstring(xml_bytes)
+    body = root.find(".//body")
+    if body is None:
+        return None, []
+
+    lines = []
+
+    def walk(el, depth):
+        tag = el.tag.split("}")[-1]
+        if tag in ("fig", "table-wrap"):
+            return                        # captured separately below
+        if tag == "title":
+            lines.append("\n" + "#" * min(depth + 1, 4) + " " + xml_text(el))
+            return
+        if tag == "p":
+            lines.append(paragraph_text(el))
+            return
+        for child in el:
+            walk(child, depth + (1 if tag == "sec" else 0))
+
+    walk(body, 0)
+
+    def media_for(href):
+        if not href:
+            return None
+        base = href.split("/")[-1]
+        for name in media_names:      # bucket file may carry an extension the XML omits
+            if name == base or name.startswith(base + "."):
+                return name
+        return None
+
+    visuals = []
+    for el in root.iter():
+        tag = el.tag.split("}")[-1]
+        if tag not in ("fig", "table-wrap"):
+            continue
+        label = xml_text(el.find("label")) or ("Figure" if tag == "fig" else "Table")
+        caption = xml_text(el.find("caption"))
+        graphic = el.find(".//graphic")
+        image = media_for(graphic.get(XLINK_HREF)) if graphic is not None else None
+        if image and not image.lower().endswith(WEB_IMAGE_EXTS):
+            image = None              # e.g. TIFF: browsers can't show it
+        table_el = el.find(".//table") if tag == "table-wrap" else None
+        table_html = table_to_html(table_el) if table_el is not None else ""
+        table_text = ""
+        if table_el is not None:
+            rows = []
+            for tr in table_el.iter():
+                if tr.tag.split("}")[-1] == "tr":
+                    rows.append(" | ".join(xml_text(c) for c in tr
+                                           if c.tag.split("}")[-1] in ("td", "th")))
+            table_text = "\n".join(rows)
+        if not image and not table_html:
+            continue
+        visuals.append({
+            "id": el.get("id") or label, "kind": tag, "label": label, "caption": caption,
+            "image": image, "table_html": table_html, "table_text": table_text,
+        })
+
+    text = "\n".join(l for l in lines if l.strip())
+    for v in visuals:
+        text += "\n\n[" + v["label"] + "] " + v["caption"]
+        if v["table_text"]:
+            text += "\n" + v["table_text"]
+    return text[:MAX_FULLTEXT_CHARS], visuals
+
+
+ANALYSIS_TOOL = {
+    "name": "submit_analysis",
+    "description": "Submit the detailed analysis of one full-text paper.",
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "overview":         {"type": "string", "description": "3-4 sentence overview of the study and its main finding."},
+            "study_design":     {"type": "string", "description": "Design, setting, enrollment period, randomization/blinding if any, sample size."},
+            "population":       {"type": "string", "description": "Inclusion/exclusion criteria and baseline characteristics that matter."},
+            "intervention":     {"type": "string", "description": "Intervention and comparator, including technical details useful to an IR (devices, embolics, doses, approach)."},
+            "results": {
+                "type": "array",
+                "description": "Primary endpoint first, then key secondary endpoints, each with the exact numbers reported.",
+                "items": {
+                    "type": "object",
+                    "properties": {"endpoint": {"type": "string"}, "finding": {"type": "string"}},
+                    "required": ["endpoint", "finding"],
+                },
+            },
+            "safety":           {"type": "string", "description": "Adverse events with grading system and rates."},
+            "strengths":        {"type": "array", "items": {"type": "string"}},
+            "limitations":      {"type": "array", "items": {"type": "string"},
+                                 "description": "Include both author-acknowledged limitations and others a critical reader would raise (bias, confounding, power, follow-up, generalizability)."},
+            "context":          {"type": "string", "description": "How the findings relate to prior evidence discussed in the paper."},
+            "practice_implications": {"type": "string", "description": "What a practicing IR should take away, and how confident to be."},
+            "key_figures": {
+                "type": "array",
+                "maxItems": MAX_KEY_FIGURES,
+                "description": "The most informative figures/tables, chosen only from the IDs listed.",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id":  {"type": "string", "description": "ID exactly as listed."},
+                        "why": {"type": "string", "description": "1-2 sentences on what it shows and why it matters."},
+                    },
+                    "required": ["id", "why"],
+                },
+            },
+        },
+        "required": ["overview", "study_design", "results", "limitations", "practice_implications", "key_figures"],
+    },
+}
+
+
+def analyze_fulltext(paper, text, visuals):
+    visual_list = "\n".join("- id: " + v["id"] + " | " + v["label"] + " | " + v["caption"][:400]
+                            for v in visuals) or "(none)"
+    prompt = (
+        "You are an experienced interventional radiologist writing a detailed, critical analysis of a "
+        "full-text paper for IR colleagues who have already read a short summary of it.\n\n"
+        "Rules:\n"
+        "- Use only information in the paper. Quote numbers exactly as reported (with CIs and p-values).\n"
+        "- Be a critical appraiser, not a press release: weigh the strength of evidence honestly.\n"
+        "- Plain text only, no HTML or markdown.\n"
+        "- For key_figures, choose up to " + str(MAX_KEY_FIGURES) + " of the figures/tables listed that "
+        "best show the main results (e.g. Kaplan-Meier curves, forest plots, primary outcome tables, "
+        "flow diagrams for trials). Use the IDs exactly as listed.\n\n"
+        "You MUST submit your answer by calling the submit_analysis tool.\n\n"
+        "Title: " + paper["title"] + "\nJournal: " + paper["journal"] + "\n\n"
+        "Figures and tables available:\n" + visual_list + "\n\n"
+        "Full text:\n" + text
+    )
+    return call_claude(prompt, ANALYSIS_TOOL, max_tokens=8000, required_key="overview")
+
+
+def render_analysis_page(paper, meta, analysis, visuals, image_files):
+    e = lambda t: html.escape(str(t or ""))
+    para = lambda t: "".join("<p>" + e(x) + "</p>" for x in str(t or "").split("\n") if x.strip())
+    bullets = lambda items: "<ul>" + "".join("<li>" + e(i) + "</li>" for i in (items or []) if str(i).strip()) + "</ul>"
+    by_id = {v["id"]: v for v in visuals}
+
+    sections = []
+    def section(title, inner):
+        if inner and inner.strip() and inner not in ("<ul></ul>",):
+            sections.append("<h2>" + title + "</h2>" + inner)
+
+    section("Overview", para(analysis.get("overview")))
+    section("Study design", para(analysis.get("study_design")))
+    section("Patients", para(analysis.get("population")))
+    section("Intervention and comparator", para(analysis.get("intervention")))
+    rows = "".join("<tr><th>" + e(r.get("endpoint")) + "</th><td>" + e(r.get("finding")) + "</td></tr>"
+                   for r in analysis.get("results") or [] if isinstance(r, dict))
+    section("Results", '<table class="results">' + rows + "</table>" if rows else "")
+
+    figs_html = ""
+    for kf in analysis.get("key_figures") or []:
+        v = by_id.get(str(kf.get("id", "")).strip())
+        if not v:
+            continue
+        if v["image"] and v["image"] in image_files:
+            visual = '<img src="' + e(image_files[v["image"]]) + '" alt="' + e(v["label"]) + '" loading="lazy">'
+        elif v["table_html"]:
+            visual = '<div class="tablewrap">' + v["table_html"] + "</div>"
+        else:
+            continue
+        figs_html += ("<figure>" + visual + "<figcaption><strong>" + e(v["label"]) + ".</strong> " +
+                      e(v["caption"]) + '<span class="why"><strong>Why it matters:</strong> ' +
+                      e(kf.get("why")) + "</span></figcaption></figure>")
+    section("Key figures", figs_html)
+
+    section("Safety", para(analysis.get("safety")))
+    section("Strengths", bullets(analysis.get("strengths")))
+    section("Limitations", bullets(analysis.get("limitations")))
+    section("In context", para(analysis.get("context")))
+    section("Implications for practice", para(analysis.get("practice_implications")))
+
+    citation = meta.get("citation") or paper["journal"]
+    doi = meta.get("doi")
+    license_code = meta.get("license_code") or "a Creative Commons license"
+    source_link = ("https://doi.org/" + doi) if doi else paper["url"]
+
+    return (
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        "<title>" + e(paper["title"]) + " — IR Digest analysis</title><style>"
+        ":root{--navy:#1a3a5c;--ink:#2b2b2b;--muted:#777;--rule:#e6e6e6;--bg:#f4f4f0;--card:#fff;--tint:#f0f4f8}"
+        "@media (prefers-color-scheme:dark){:root{--navy:#9cc0e4;--ink:#e4e4e4;--muted:#a0a0a0;--rule:#333;--bg:#121417;--card:#1b1e22;--tint:#20262d}}"
+        "*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:17px/1.7 Georgia,serif}"
+        ".wrap{max-width:820px;margin:0 auto;padding:16px}"
+        "article{background:var(--card);border-radius:10px;padding:28px 32px;box-shadow:0 2px 12px rgba(0,0,0,.08)}"
+        ".kicker{font:600 12px/1.4 -apple-system,Segoe UI,sans-serif;letter-spacing:.06em;text-transform:uppercase;color:var(--muted);margin:0 0 6px}"
+        "h1{color:var(--navy);font-size:26px;line-height:1.3;margin:0 0 10px}"
+        ".cite{color:var(--muted);font-size:14px;margin:0 0 18px}"
+        "h2{color:var(--navy);font-size:19px;margin:30px 0 8px;padding-top:14px;border-top:1px solid var(--rule)}"
+        "table{border-collapse:collapse;width:100%;font-size:15px}"
+        "th,td{border-bottom:1px solid var(--rule);padding:8px 10px;text-align:left;vertical-align:top}"
+        ".results th{width:34%;color:var(--navy)}"
+        "figure{margin:18px 0 26px}figure img{display:block;max-width:100%;height:auto;margin:0 auto;background:#fff;border-radius:4px}"
+        ".tablewrap{overflow-x:auto;font-size:13px;background:var(--tint);border-radius:6px;padding:4px}"
+        "figcaption{font-size:14px;color:var(--muted);margin-top:8px;line-height:1.55}"
+        ".why{display:block;margin-top:6px;color:var(--ink)}"
+        "ul{padding-left:22px}li{margin:4px 0}"
+        ".btn{display:inline-block;background:var(--navy);color:var(--card);text-decoration:none;padding:7px 16px;border-radius:5px;font:600 13px -apple-system,Segoe UI,sans-serif;margin:4px 8px 4px 0}"
+        "footer{font-size:13px;color:var(--muted);margin-top:30px;padding-top:14px;border-top:1px solid var(--rule)}"
+        "@media (max-width:600px){article{padding:20px 16px}h1{font-size:22px}body{font-size:16px}}"
+        "</style></head><body><div class='wrap'><article>"
+        '<p class="kicker">IR Weekly Literature Digest · Full-text analysis</p>'
+        "<h1>" + e(paper["title"]) + "</h1>"
+        '<p class="cite">' + e(citation) + "</p>"
+        '<a class="btn" href="' + e(source_link) + '">Read the original article</a>'
+        '<a class="btn" href="' + e(paper["url"]) + '">PubMed</a>'
+        + "".join(sections) +
+        "<footer>This analysis was generated by Claude AI from the open-access full text and may contain errors; "
+        "check the original article before acting on it. Figures and tables are reproduced from "
+        + e(citation) + " under " + e(license_code) +
+        ' (<a href="' + e(source_link) + '">source</a>), via PubMed Central.</footer>'
+        "</article></div></body></html>"
+    )
+
+
+def build_analysis_page(paper, pmc_num, run_dir):
+    """Create docs/<date>/<pmid>/index.html. Returns the relative path, or None if not possible."""
+    prefix, meta = find_open_access_record(pmc_num)
+    if not meta:
+        print("  PMID " + paper["pmid"] + ": not in the PMC open-access dataset.")
+        return None
+    license_code = (meta.get("license_code") or "").upper()
+    if not meta.get("is_pmc_openaccess") or not (license_code.startswith("CC") or "PUBLIC" in license_code):
+        print("  PMID " + paper["pmid"] + ": in PMC but not openly licensed (" + str(meta.get("license_code")) + ").")
+        return None
+    if meta.get("is_retracted"):
+        return None
+
+    ver_id = prefix.rstrip("/")
+    media_names = [u.split("/")[-1].split("?")[0] for u in meta.get("media_urls") or []]
+    xml_bytes = http_request(PMC_S3 + prefix + ver_id + ".xml", label="PMC full text")
+    text, visuals = parse_fulltext(xml_bytes, media_names)
+    if not text or len(text) < 2000:
+        print("  PMID " + paper["pmid"] + ": full text too short to analyze.")
+        return None
+
+    print("  PMID " + paper["pmid"] + ": analyzing full text (" + str(len(text)) + " chars, " +
+          str(len(visuals)) + " figures/tables)...")
+    analysis = analyze_fulltext(paper, text, visuals)
+
+    out_dir = os.path.join(run_dir, paper["pmid"])
+    os.makedirs(out_dir, exist_ok=True)
+    by_id = {v["id"]: v for v in visuals}
+    image_files = {}
+    for kf in analysis.get("key_figures") or []:
+        v = by_id.get(str(kf.get("id", "")).strip())
+        if not v or not v["image"] or v["image"] in image_files:
+            continue
+        try:
+            data = http_request(PMC_S3 + prefix + urllib.parse.quote(v["image"]), label="figure " + v["image"])
+            with open(os.path.join(out_dir, v["image"]), "wb") as f:
+                f.write(data)
+            image_files[v["image"]] = v["image"]
+        except Exception as ex:
+            print("    Could not download " + v["image"] + ": " + str(ex))
+
+    with open(os.path.join(out_dir, "index.html"), "w", encoding="utf-8") as f:
+        f.write(render_analysis_page(paper, meta, analysis, visuals, image_files))
+    return os.path.relpath(out_dir, SITE_DIR).replace(os.sep, "/") + "/"
+
+
+def publish_site(message):
+    """Commit and push the docs/ folder so GitHub Pages serves the new pages."""
+    import subprocess
+    def git(*args):
+        return subprocess.run(["git"] + list(args), capture_output=True, text=True)
+    git("config", "user.name", "IR Digest Bot")
+    git("config", "user.email", "41898282+github-actions[bot]@users.noreply.github.com")
+    git("add", SITE_DIR)
+    if git("diff", "--cached", "--quiet").returncode == 0:
+        return True                       # nothing new
+    commit = git("commit", "-m", message)
+    if commit.returncode != 0:
+        print("  git commit failed: " + commit.stderr.strip())
+        return False
+    for attempt in range(3):
+        push = git("push")
+        if push.returncode == 0:
+            print("  Published analysis pages.")
+            return True
+        print("  git push failed (attempt " + str(attempt + 1) + "): " + push.stderr.strip())
+        git("pull", "--rebase")
+        time.sleep(5)
+    return False
+
+
+def build_analysis_pages(digest, papers, date_to):
+    """Returns {pmid: absolute URL} for selected papers that got a full-text page."""
+    base = pages_base_url()
+    if not base:
+        print("Step 2b: skipped (no GitHub repository info, so no Pages URL).")
+        return {}
+    print("Step 2b: Building full-text analysis pages...")
+    by_pmid = {p["pmid"]: p for p in papers}
+    selected = []
+    for item in digest.get("papers", []):
+        pmid = "".join(ch for ch in str(item.get("pmid", "")) if ch.isdigit())
+        if pmid in by_pmid and pmid not in selected:
+            selected.append(pmid)
+
+    try:
+        pmcids = pmids_to_pmcids(selected)
+    except Exception as ex:
+        print("  Could not look up PMC IDs: " + str(ex))
+        return {}
+    print("  " + str(len(pmcids)) + " of " + str(len(selected)) + " selected papers are in PubMed Central.")
+
+    run_dir = os.path.join(SITE_DIR, date_to.replace("/", "-"))
+    built = {}
+    for pmid in selected:
+        if pmid not in pmcids:
+            continue
+        try:
+            rel = build_analysis_page(by_pmid[pmid], pmcids[pmid], run_dir)
+            if rel:
+                built[pmid] = base + rel
+        except Exception as ex:
+            print("  PMID " + pmid + ": analysis page failed (" + str(ex) + "); no button for this paper.")
+
+    if not built:
+        print("  No full-text pages this week.")
+        return {}
+    os.makedirs(SITE_DIR, exist_ok=True)
+    open(os.path.join(SITE_DIR, ".nojekyll"), "w").close()
+    if not publish_site("Add full-text analysis pages for " + date_to):
+        print("  Could not publish pages; sending without full-text buttons.")
+        return {}
+    print("  Full-text pages: " + str(len(built)))
+    return built
 
 
 def safe_summary(text):
@@ -467,7 +901,8 @@ def safe_summary(text):
     return escaped.replace("&lt;u&gt;", "<u>").replace("&lt;/u&gt;", "</u>")
 
 
-def build_html_email(digest, papers, date_from, date_to):
+def build_html_email(digest, papers, date_from, date_to, analysis_urls=None):
+    analysis_urls = analysis_urls or {}
     print("Step 3: Building HTML email...")
 
     by_pmid = {p["pmid"]: p for p in papers}
@@ -489,6 +924,7 @@ def build_html_email(digest, papers, date_from, date_to):
             "url":         paper["url"],
             "bottom_line": html.escape(item.get("bottom_line", "")),
             "summary":     safe_summary(item["summary"]),
+            "analysis":    analysis_urls.get(pmid),
         })
 
     if not entries:
@@ -519,6 +955,12 @@ def build_html_email(digest, papers, date_from, date_to):
             '<a href="' + e["url"] + '" style="display:inline-block;background:#1a3a5c;color:white;'
             'text-decoration:none;padding:7px 16px;border-radius:5px;font-size:13px;font-weight:600;">'
             'View on PubMed &#8594;</a>'
+            + (
+                ' &nbsp;<a href="' + html.escape(e["analysis"]) + '" style="display:inline-block;background:#ffffff;'
+                'color:#1a3a5c;border:1.5px solid #1a3a5c;text-decoration:none;padding:6px 15px;border-radius:5px;'
+                'font-size:13px;font-weight:600;">Full-Text Analysis &amp; Figures &#8594;</a>'
+                if e["analysis"] else ""
+            ) +
             '</div>'
         )
 
@@ -658,7 +1100,8 @@ if __name__ == "__main__":
         raise SystemExit(0)
 
     digest = summarize(new_papers)
-    html_email, included_pmids = build_html_email(digest, new_papers, date_from, date_to)
+    analysis_urls = build_analysis_pages(digest, new_papers, date_to)
+    html_email, included_pmids = build_html_email(digest, new_papers, date_from, date_to, analysis_urls)
     sent = send_email(html_email, date_from, date_to, subscribers)
 
     # Only the papers that actually appeared in the email are recorded.
