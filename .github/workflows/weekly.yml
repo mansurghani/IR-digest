@@ -2,12 +2,17 @@ name: IR Weekly Digest
 
 on:
   schedule:
-    - cron: '0 15 * * 1'  # Every Monday at 7:00am Pacific time (UTC-8)
+    - cron: '0 15 * * 1'  # Mondays 15:00 UTC = 11am Eastern / 8am Pacific (10am / 7am in winter)
   workflow_dispatch:
+    inputs:
+      test_email:
+        description: 'Send ONLY to this address (test run, PMID history not updated). Leave blank to send to all subscribers.'
+        required: false
+        default: ''
 
 permissions:
   contents: write
-  
+
 jobs:
   send-digest:
     runs-on: ubuntu-latest
@@ -28,4 +33,5 @@ jobs:
           SHEET_URL: ${{ secrets.SHEET_URL }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
+          TEST_EMAIL: ${{ github.event.inputs.test_email }}
         run: python ir_digest.py
