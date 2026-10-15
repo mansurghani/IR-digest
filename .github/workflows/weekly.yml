@@ -30,7 +30,7 @@ jobs:
           GMAIL_ADDRESS: ${{ secrets.GMAIL_ADDRESS }}
           GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
           SHEET_ID: ${{ secrets.SHEET_ID }}
-          SHEET_URL: ${{ secrets.SHEET_URL }}
+          FORM_URL: ${{ secrets.FORM_URL }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
           TEST_EMAIL: ${{ github.event.inputs.test_email }}
