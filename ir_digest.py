@@ -362,7 +362,7 @@ def summarize(papers):
         "INCORRECT: <u>This study demonstrated that TACE was superior to best supportive care.</u>\n"
         "Use only numbers stated in the abstract. Do not use any other HTML.\n\n"
         "Then write an editors_note: 2 sentences on the overall theme of this week's literature.\n\n"
-        "Submit your answer with the submit_digest tool.\n\n"
+        "You MUST submit your answer by calling the submit_digest tool. Do not reply with plain text.\n\n"
         "Papers:\n" + paper_list
     )
 
@@ -370,7 +370,9 @@ def summarize(papers):
         "model": CLAUDE_MODEL,
         "max_tokens": 12000,
         "tools": [DIGEST_TOOL],
-        "tool_choice": {"type": "tool", "name": "submit_digest"},
+        # Newer models don't allow forcing a specific tool; "auto" plus the
+        # prompt instruction works, and the text fallback below covers the rest.
+        "tool_choice": {"type": "auto"},
         "messages": [{"role": "user", "content": prompt}],
     }).encode()
 
@@ -386,11 +388,34 @@ def summarize(papers):
         label="Claude API",
     )
     response = json.loads(raw)
-    for block in response.get("content", []):
+    content = response.get("content", [])
+
+    digest = None
+    for block in content:
         if block.get("type") == "tool_use" and block.get("name") == "submit_digest":
-            print("Step 2 complete. Claude selected " + str(len(block["input"].get("papers", []))) + " papers.")
-            return block["input"]
-    raise RuntimeError("Claude did not return a digest. Stop reason: " + str(response.get("stop_reason")))
+            digest = block["input"]
+            break
+
+    if digest is None:
+        # Fallback: Claude answered in text. Pull out the JSON object if there is one.
+        text = "".join(b.get("text", "") for b in content if b.get("type") == "text")
+        start, end = text.find("{"), text.rfind("}")
+        if start != -1 and end > start:
+            try:
+                candidate = json.loads(text[start:end + 1])
+                if isinstance(candidate, dict) and "papers" in candidate:
+                    digest = candidate
+                    print("  (Claude replied in text; parsed the JSON from it.)")
+            except json.JSONDecodeError:
+                pass
+
+    if digest is None:
+        raise RuntimeError("Claude did not return a digest. Stop reason: " +
+                           str(response.get("stop_reason")) + ". Reply start: " +
+                           json.dumps(content)[:500])
+
+    print("Step 2 complete. Claude selected " + str(len(digest.get("papers", []))) + " papers.")
+    return digest
 
 
 def safe_summary(text):
