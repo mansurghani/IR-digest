@@ -367,7 +367,7 @@ DIGEST_TOOL = {
 }
 
 
-def call_claude(prompt, tool, max_tokens, required_key):
+def call_claude(prompt, tool, max_tokens, required_key, _retry_truncated=True):
     """Ask Claude to answer through `tool`; returns the tool input as a dict."""
     payload = json.dumps({
         "model": CLAUDE_MODEL,
@@ -392,6 +392,13 @@ def call_claude(prompt, tool, max_tokens, required_key):
     )
     response = json.loads(raw)
     content = response.get("content", [])
+
+    if response.get("stop_reason") == "max_tokens":
+        # The reply was cut off, so the tool input is incomplete. Retry once with more room.
+        if _retry_truncated:
+            print("  Claude's reply was cut off at " + str(max_tokens) + " tokens; retrying with more room...")
+            return call_claude(prompt, tool, max_tokens * 2, required_key, _retry_truncated=False)
+        raise RuntimeError("Claude's reply was cut off even at " + str(max_tokens) + " tokens.")
 
     for block in content:
         if block.get("type") == "tool_use" and block.get("name") == tool["name"]:
@@ -673,8 +680,54 @@ ANALYSIS_TOOL = {
 }
 
 
+def visual_key(s):
+    """Normalize 'F2', 'Fig. 2', 'Figure 2', 'fig2' -> 'fig2'; 'T3', 'Table 3' -> 'tab3'."""
+    s = str(s or "").strip().lower()
+    num = "".join(ch for ch in s if ch.isdigit())
+    letters = "".join(ch for ch in s if ch.isalpha())
+    if letters.startswith(("fig", "f")) and not letters.startswith("ft"):
+        return "fig" + num
+    if letters.startswith(("tab", "t")):
+        return "tab" + num
+    return s
+
+
+def match_visual(ref, visuals):
+    """Find the figure/table Claude meant, whether it used the ID or the label."""
+    ref = str(ref or "").strip()
+    for v in visuals:
+        if ref == v["id"] or ref.lower() == v["label"].lower().rstrip("."):
+            return v
+    key = visual_key(ref)
+    for v in visuals:
+        if key and (key == visual_key(v["label"]) or key == visual_key(v["id"])):
+            return v
+    return None
+
+
+def analysis_problems(analysis, visuals):
+    """Return a list of reasons the analysis isn't good enough to publish."""
+    problems = []
+    # Core sections every paper should have; others (safety, intervention) may legitimately be thin.
+    for field, minimum in (("overview", 200), ("study_design", 80), ("practice_implications", 120)):
+        if len(str(analysis.get(field) or "").strip()) < minimum:
+            problems.append(field + " is missing or too brief")
+    results = [r for r in (analysis.get("results") or []) if isinstance(r, dict) and r.get("finding")]
+    if len(results) < 2:
+        problems.append("results should list the primary endpoint and the key secondary endpoints")
+    if len(analysis.get("limitations") or []) < 3:
+        problems.append("limitations should list at least three items")
+    if visuals:
+        matched = [kf for kf in (analysis.get("key_figures") or [])
+                   if isinstance(kf, dict) and match_visual(kf.get("id"), visuals)]
+        if not matched:
+            problems.append("key_figures must use IDs from the list provided (e.g. " +
+                            ", ".join(v["id"] for v in visuals[:3]) + ")")
+    return problems
+
+
 def analyze_fulltext(paper, text, visuals):
-    visual_list = "\n".join("- id: " + v["id"] + " | " + v["label"] + " | " + v["caption"][:400]
+    visual_list = "\n".join('- ID "' + v["id"] + '" = ' + v["label"] + ": " + v["caption"][:400]
                             for v in visuals) or "(none)"
     prompt = (
         "You are an experienced interventional radiologist writing a detailed, critical analysis of a "
@@ -683,23 +736,36 @@ def analyze_fulltext(paper, text, visuals):
         "- Use only information in the paper. Quote numbers exactly as reported (with CIs and p-values).\n"
         "- Be a critical appraiser, not a press release: weigh the strength of evidence honestly.\n"
         "- Plain text only, no HTML or markdown.\n"
+        "- Be thorough: this page is for readers who want more than the abstract. Aim for roughly "
+        "900-1400 words in total. Give the primary endpoint and every important secondary endpoint "
+        "(survival, response, local control, subgroup or adjusted analyses), each with exact numbers, "
+        "and at least three substantive limitations.\n"
         "- For key_figures, choose up to " + str(MAX_KEY_FIGURES) + " of the figures/tables listed that "
         "best show the main results (e.g. Kaplan-Meier curves, forest plots, primary outcome tables, "
-        "flow diagrams for trials). Use the IDs exactly as listed.\n\n"
+        "flow diagrams for trials). In key_figures, put the quoted ID exactly as listed "
+        "(for example \"" + (visuals[0]["id"] if visuals else "F1") + "\"), not the label.\n\n"
         "You MUST submit your answer by calling the submit_analysis tool.\n\n"
         "Title: " + paper["title"] + "\nJournal: " + paper["journal"] + "\n\n"
         "Figures and tables available:\n" + visual_list + "\n\n"
         "Full text:\n" + text
     )
-    return call_claude(prompt, ANALYSIS_TOOL, max_tokens=8000, required_key="overview")
+    analysis = call_claude(prompt, ANALYSIS_TOOL, max_tokens=12000, required_key="overview")
+    problems = analysis_problems(analysis, visuals)
+    if problems:
+        print("    First draft incomplete (" + "; ".join(problems) + "). Asking Claude to revise...")
+        retry_prompt = (prompt + "\n\nA previous attempt was rejected because: " + "; ".join(problems) +
+                        ". Write the complete analysis again, fixing these problems.")
+        analysis = call_claude(retry_prompt, ANALYSIS_TOOL, max_tokens=12000, required_key="overview")
+        problems = analysis_problems(analysis, visuals)
+        if problems:
+            raise RuntimeError("analysis still incomplete after retry: " + "; ".join(problems))
+    return analysis
 
 
 def render_analysis_page(paper, meta, analysis, visuals, image_files):
     e = lambda t: html.escape(str(t or ""))
     para = lambda t: "".join("<p>" + e(x) + "</p>" for x in str(t or "").split("\n") if x.strip())
     bullets = lambda items: "<ul>" + "".join("<li>" + e(i) + "</li>" for i in (items or []) if str(i).strip()) + "</ul>"
-    by_id = {v["id"]: v for v in visuals}
-
     sections = []
     def section(title, inner):
         if inner and inner.strip() and inner not in ("<ul></ul>",):
@@ -715,7 +781,7 @@ def render_analysis_page(paper, meta, analysis, visuals, image_files):
 
     figs_html = ""
     for kf in analysis.get("key_figures") or []:
-        v = by_id.get(str(kf.get("id", "")).strip())
+        v = match_visual(kf.get("id") if isinstance(kf, dict) else None, visuals)
         if not v:
             continue
         if v["image"] and v["image"] in image_files:
@@ -806,10 +872,9 @@ def build_analysis_page(paper, pmc_num, run_dir):
 
     out_dir = os.path.join(run_dir, paper["pmid"])
     os.makedirs(out_dir, exist_ok=True)
-    by_id = {v["id"]: v for v in visuals}
     image_files = {}
     for kf in analysis.get("key_figures") or []:
-        v = by_id.get(str(kf.get("id", "")).strip())
+        v = match_visual(kf.get("id") if isinstance(kf, dict) else None, visuals)
         if not v or not v["image"] or v["image"] in image_files:
             continue
         try:
@@ -819,6 +884,17 @@ def build_analysis_page(paper, pmc_num, run_dir):
             image_files[v["image"]] = v["image"]
         except Exception as ex:
             print("    Could not download " + v["image"] + ": " + str(ex))
+
+    shown = [kf for kf in analysis.get("key_figures") or []
+             if isinstance(kf, dict) and (lambda v: v and ((v["image"] in image_files) or v["table_html"]))(
+                 match_visual(kf.get("id"), visuals))]
+    if visuals and not shown:
+        print("  PMID " + paper["pmid"] + ": no figures could be included; skipping the page.")
+        return None
+    words = sum(len(str(analysis.get(k) or "").split()) for k in
+                ("overview", "study_design", "population", "intervention", "safety", "context", "practice_implications"))
+    print("    Analysis: ~" + str(words) + " words of prose, " + str(len(analysis.get("results") or [])) +
+          " results, " + str(len(shown)) + " figures/tables.")
 
     with open(os.path.join(out_dir, "index.html"), "w", encoding="utf-8") as f:
         f.write(render_analysis_page(paper, meta, analysis, visuals, image_files))
