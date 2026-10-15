@@ -18,7 +18,7 @@ ANTHROPIC_API_KEY  = os.environ["ANTHROPIC_API_KEY"]
 GMAIL_ADDRESS      = os.environ["GMAIL_ADDRESS"]
 GMAIL_APP_PASSWORD = os.environ["GMAIL_APP_PASSWORD"]
 SHEET_ID           = os.environ["SHEET_ID"]
-SHEET_URL          = os.environ["SHEET_URL"]
+FORM_URL           = os.environ["FORM_URL"]   # public link to the subscribe/unsubscribe Google Form
 
 # Test mode: if TEST_EMAIL is set, the digest goes ONLY to that address
 # and the PMID history is NOT updated (so the real Monday run is unaffected).
@@ -99,17 +99,35 @@ def fetch_subscribers():
     if TEST_EMAIL:
         print("TEST MODE: sending only to " + TEST_EMAIL)
         return [TEST_EMAIL.lower()]
-    print("Fetching subscribers from Google Sheet...")
+    print("Fetching subscribers from Google Form responses...")
     csv_url = "https://docs.google.com/spreadsheets/d/" + SHEET_ID + "/export?format=csv"
     content = http_request(csv_url, label="Google Sheet").decode("utf-8")
-    reader = csv.reader(content.splitlines())
-    next(reader, None)
-    emails = set()
-    for row in reader:
-        if row and "@" in row[0]:
-            emails.add(row[0].strip().lower())
-    print("Subscribers found: " + str(len(emails)))
-    return sorted(emails)
+    rows = list(csv.reader(content.splitlines()))
+    if not rows:
+        return []
+
+    # Find the columns by their header text, so column order doesn't matter.
+    header = [h.strip().lower() for h in rows[0]]
+    email_col  = next((i for i, h in enumerate(header) if "email" in h), None)
+    action_col = next((i for i, h in enumerate(header) if "subscribe" in h), None)
+    if email_col is None:
+        raise RuntimeError("No column with 'email' in its header found in the sheet: " + str(rows[0]))
+
+    # Rows are in submission order, so each person's latest choice wins.
+    status = {}
+    for row in rows[1:]:
+        if len(row) <= email_col:
+            continue
+        email = row[email_col].strip().lower()
+        if "@" not in email:
+            continue
+        action = row[action_col].strip().lower() if action_col is not None and len(row) > action_col else "subscribe"
+        status[email] = not action.startswith("unsubscribe")
+
+    emails = sorted(e for e, subscribed in status.items() if subscribed)
+    print("Subscribers found: " + str(len(emails)) +
+          " (" + str(len(status) - len(emails)) + " unsubscribed)")
+    return emails
 
 
 def build_query(date_from_str, date_to_str):
@@ -512,13 +530,11 @@ def build_html_email(digest, papers, date_from, date_to):
         '</p></div>'
         '<div style="padding:20px 36px;text-align:center;border-top:1px solid #e8e8e8;">'
         '<p style="margin:0 0 12px;font-size:13px;color:#666;">'
-        'To subscribe or unsubscribe from this newsletter, click below.</p>'
-        '<a href="' + SHEET_URL + '" style="display:inline-block;background:#1a3a5c;color:white;'
+        'Know a colleague who would enjoy this? Forward it along. To subscribe or unsubscribe, use the form below.</p>'
+        '<a href="' + FORM_URL + '" style="display:inline-block;background:#1a3a5c;color:white;'
         'text-decoration:none;padding:8px 20px;border-radius:5px;font-size:13px;font-weight:600;">'
         'Manage Subscription</a>'
-        '<p style="margin:12px 0 0;font-size:11px;color:#aaa;">'
-        'Add your email to the list to subscribe, or delete it to unsubscribe.'
-        '</p></div>'
+        '</div>'
         '<div style="padding:16px 36px;text-align:center;">'
         '<p style="margin:0;font-size:12px;color:#aaa;">'
         'Papers sourced from PubMed · Summarized by Claude AI · For informational purposes only'
