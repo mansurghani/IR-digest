@@ -50,17 +50,21 @@ OTHER_JOURNALS = [
     "Radiology", "Eur Radiol", "AJR Am J Roentgenol", "J Am Coll Radiol",
     "Eur J Radiol", "Abdom Radiol (NY)", "Diagn Interv Imaging",
     "Korean J Radiol", "Radiol Imaging Cancer", "Diagn Interv Radiol",
+    "Radiol Med", "Interv Radiol (Higashimatsuyama)", "Int J Hyperthermia",
     # Hepatology / GI
     "J Hepatol", "Hepatology", "JHEP Rep", "Hepatol Int", "Liver Cancer",
+    "Liver Int", "J Hepatocell Carcinoma", "Clin Mol Hepatol",
     "Gut", "Gastroenterology", "Clin Gastroenterol Hepatol",
-    "Lancet Gastroenterol Hepatol",
+    "Lancet Gastroenterol Hepatol", "Aliment Pharmacol Ther", "Am J Gastroenterol",
     # Oncology
     "J Clin Oncol", "Ann Oncol", "Lancet Oncol", "JAMA Oncol", "Cancer",
     # Surgery / vascular / venous
-    "Ann Surg", "J Vasc Surg", "J Vasc Surg Venous Lymphat Disord",
-    "Eur J Vasc Endovasc Surg",
+    "Ann Surg", "Br J Surg", "JAMA Surg",
+    "J Vasc Surg", "J Vasc Surg Venous Lymphat Disord", "Eur J Vasc Endovasc Surg",
+    "J Endovasc Ther", "Ann Vasc Surg", "Vasc Med",
     # Cardiopulmonary / thrombosis (PE, DVT)
     "Circulation", "Eur Heart J", "Chest", "J Thromb Haemost",
+    "Res Pract Thromb Haemost", "Thromb Res",
     # Dialysis access
     "J Vasc Access",
     # Urology (PAE, renal ablation)
@@ -173,9 +177,30 @@ def build_query(date_from_str, date_to_str):
     # unlike the publication date, which is often just a month (counted as the 1st).
     date_query = '("' + date_from_str + '"[EDAT] : "' + date_to_str + '"[EDAT])'
 
+    # Rule 3: high-level evidence on a core IR topic, from ANY journal, so a major
+    # trial or meta-analysis isn't missed just because it ran somewhere unexpected.
+    core_ir_topics_query = (
+        '("Radiology, Interventional"[MeSH] OR "Embolization, Therapeutic"[MeSH] '
+        'OR "Chemoembolization, Therapeutic"[MeSH] '
+        'OR "Portasystemic Shunt, Transjugular Intrahepatic"[MeSH] OR "Vena Cava Filters"[MeSH] '
+        'OR "chemoembolization"[tiab] OR "radioembolization"[tiab] OR "transarterial"[tiab] '
+        'OR "embolization"[tiab] OR "embolisation"[tiab] OR "transjugular intrahepatic"[tiab] '
+        'OR "microwave ablation"[tiab] OR "radiofrequency ablation"[tiab] OR "cryoablation"[tiab] '
+        'OR "histotripsy"[tiab] OR "irreversible electroporation"[tiab] '
+        'OR "catheter-directed"[tiab] OR "percutaneous thrombectomy"[tiab] '
+        'OR "interventional radiology"[tiab] OR "interventional radiologist"[tiab] '
+        'OR "hepatic arterial infusion"[tiab] OR "yttrium-90"[tiab] '
+        'OR "selective internal radiation"[tiab] OR "retrograde transvenous"[tiab] '
+        'OR "percutaneous transhepatic"[tiab] OR "vertebroplasty"[tiab] OR "kyphoplasty"[tiab])'
+    )
+    high_evidence_query = (
+        '("Randomized Controlled Trial"[pt] OR "Meta-Analysis"[pt] OR "Systematic Review"[pt])'
+    )
+
     return (
         "(" + journal_or(IR_JOURNALS) +
-        " OR (" + journal_or(OTHER_JOURNALS) + " AND " + ir_keywords_query + ")) "
+        " OR (" + journal_or(OTHER_JOURNALS) + " AND " + ir_keywords_query + ")"
+        " OR (" + core_ir_topics_query + " AND " + high_evidence_query + ")) "
         + exclusions_query + " AND " + date_query
     )
 
